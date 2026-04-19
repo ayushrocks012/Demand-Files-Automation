@@ -34,24 +34,34 @@ let
         
         CleanedChannels = Table.TransformColumns(StandardizedHeaders, {{"Channel_Name", each try Text.Trim(_) otherwise _}}),
 
-        // NEW FIX 1: Unpivot FIRST. "UnpivotOtherColumns" safely grabs all date columns (Jan-23 to Dec-27+)
-        Unpivoted = Table.UnpivotOtherColumns(CleanedChannels, {"Column_A", "Channel_Name"}, "Forecast_Date", "Value"),
+        // Unpivot EVERYTHING to the right (Captures Dates AND Junk)
+        Unpivoted = Table.UnpivotOtherColumns(CleanedChannels, {"Column_A", "Channel_Name"}, "Raw_Header", "Value"),
         
-        // NEW FIX 2: Do the Inner Join AFTER the dates are flattened.
-        MergedChannels = Table.NestedJoin(Unpivoted, {"Channel_Name"}, ValidChannelsTable, {"Channel Name"}, "ChannelMasterInfo", JoinKind.Inner),
+        // NEW: The Strict Date Parser
+        // Tries to convert the header to a Real Date. If it's "0.00%_1", it fails and returns null.
+        ParseDates = Table.AddColumn(Unpivoted, "Parsed_Date", each 
+            let 
+                AsNumber = try Number.From([Raw_Header]) otherwise null,
+                AsSerial = if AsNumber <> null and AsNumber > 30000 then Date.From(AsNumber) else null,
+                AsText = try Date.FromText([Raw_Header]) otherwise null
+            in 
+                if AsSerial <> null then AsSerial else AsText, type date
+        ),
+        
+        // NEW: Filter out all the Junk Columns! (Drops any row where the date parse failed)
+        FilteredDatesOnly = Table.SelectRows(ParseDates, each [Parsed_Date] <> null),
+        
+        // NEW: Format the valid dates exactly how you want them ("Jan-23")
+        FormattedDates = Table.TransformColumns(FilteredDatesOnly, {{"Parsed_Date", each Date.ToText(_, "MMM-yy"), type text}}),
+        
+        // Cleanup the columns (Remove the raw headers, rename the clean ones)
+        FinalDates = Table.RenameColumns(Table.RemoveColumns(FormattedDates, {"Raw_Header"}), {{"Parsed_Date", "Forecast_Date"}}),
+
+        // Inner Join to filter valid Channels AND pull in the Data Format Type
+        MergedChannels = Table.NestedJoin(FinalDates, {"Channel_Name"}, ValidChannelsTable, {"Channel Name"}, "ChannelMasterInfo", JoinKind.Inner),
         ExpandedType = Table.ExpandTableColumn(MergedChannels, "ChannelMasterInfo", {"Type"}, {"Data_Format_Type"}),
-
-        // NEW FIX 3: Date Cleanup. If Excel turned "Jan-23" into "44927" during headers, change it back.
-        CleanDates = Table.TransformColumns(ExpandedType, {
-            {"Forecast_Date", each 
-                if try Number.From(_) > 30000 otherwise false 
-                then Date.ToText(Date.From(Number.From(_)), "MMM-yy") 
-                else _ 
-            }
-        }),
-
-        // Ensure the Value column is strictly treated as a number
-        TypedValues = Table.TransformColumnTypes(CleanDates, {{"Value", type number}}),
+        
+        TypedValues = Table.TransformColumnTypes(ExpandedType, {{"Value", type number}}),
         
         CleanSheetName = Text.Replace(SheetName, "#", "."),
         AddedBrand = Table.AddColumn(TypedValues, "Brand", each CleanSheetName)
