@@ -3,61 +3,70 @@ let
     // 1. Open the Excel workbook
     Workbook = Excel.Workbook(FileBinary, true, true),
 
-    // 2. Ask the Vault which sheets belong to this specific Growth Driver
+    // 2. Ask the Vault for the valid Sheets AND valid Channels
     ValidSheetsTable = Table.SelectRows(ParameterVault[Sheets], each [Growth Driver] = GrowthDriverName),
     ValidSheetNames = List.Buffer(List.Transform(ValidSheetsTable[Sheet Name], Text.Upper)),
+    ValidChannelsTable = Table.SelectRows(ParameterVault[Channels], each [Growth Driver] = GrowthDriverName),
 
-    // 3. Resilient Filter: Handles missing columns, replaces "#", and ignores Case Sensitivity
+    // 3. Resilient Filter for Sheets
     FilteredSheets = Table.SelectRows(Workbook, each 
         List.Contains(ValidSheetNames, Text.Upper(Text.Replace([Name], "#", "."))) 
         and Record.FieldOrDefault(_, "Kind", "Sheet") = "Sheet"
     ),
 
-    // 4. Ask the Vault where the data actually starts (e.g., Row 66)
+    // 4. Ask the Vault where the data actually starts
     DateRowString = Table.SelectRows(ParameterVault[Config], each [KeyDetails] = "Date Row"){0}[Value],
     DateRow = Number.From(DateRowString),
 
     // 5. Build the mini-process to clean a SINGLE sheet
     ProcessSheet = (SheetData as table, SheetName as text) =>
     let
-        // Skip the junk rows above the header
         SkippedRows = Table.Skip(SheetData, DateRow - 1),
-        // Promote the new top row to be the column headers
         PromotedHeaders = Table.PromoteHeaders(SkippedRows, [PromoteAllScalars=true]),
         
-        // Dynamically grab the names of the first two columns to standardize them
         ColAName = Table.ColumnNames(PromotedHeaders){0},
         LabelColumnName = Table.ColumnNames(PromotedHeaders){1},
         
-        // Rename them to safe, standardized names
         StandardizedHeaders = Table.RenameColumns(PromotedHeaders, {
             {ColAName, "Column_A"}, 
             {LabelColumnName, "Channel_Name"}
         }),
         
-        // Remove any row where the Channel Name is completely blank
-        FilteredBlanks = Table.SelectRows(StandardizedHeaders, each [Channel_Name] <> null and [Channel_Name] <> ""),
+        CleanedChannels = Table.TransformColumns(StandardizedHeaders, {{"Channel_Name", each try Text.Trim(_) otherwise _}}),
 
-        // Unpivot all columns EXCEPT Column_A and Channel_Name (meaning, unpivot the dates)
-        AllStandardColumns = Table.ColumnNames(FilteredBlanks),
-        ColumnsToUnpivot = List.Skip(AllStandardColumns, 2),
-        Unpivoted = Table.Unpivot(FilteredBlanks, ColumnsToUnpivot, "Forecast_Date", "Value"),
+        // NEW FIX 1: Unpivot FIRST. "UnpivotOtherColumns" safely grabs all date columns (Jan-23 to Dec-27+)
+        Unpivoted = Table.UnpivotOtherColumns(CleanedChannels, {"Column_A", "Channel_Name"}, "Forecast_Date", "Value"),
         
-        // Convert the hash back to a dot for your final, clean Output file
+        // NEW FIX 2: Do the Inner Join AFTER the dates are flattened.
+        MergedChannels = Table.NestedJoin(Unpivoted, {"Channel_Name"}, ValidChannelsTable, {"Channel Name"}, "ChannelMasterInfo", JoinKind.Inner),
+        ExpandedType = Table.ExpandTableColumn(MergedChannels, "ChannelMasterInfo", {"Type"}, {"Data_Format_Type"}),
+
+        // NEW FIX 3: Date Cleanup. If Excel turned "Jan-23" into "44927" during headers, change it back.
+        CleanDates = Table.TransformColumns(ExpandedType, {
+            {"Forecast_Date", each 
+                if try Number.From(_) > 30000 otherwise false 
+                then Date.ToText(Date.From(Number.From(_)), "MMM-yy") 
+                else _ 
+            }
+        }),
+
+        // Ensure the Value column is strictly treated as a number
+        TypedValues = Table.TransformColumnTypes(CleanDates, {{"Value", type number}}),
+        
         CleanSheetName = Text.Replace(SheetName, "#", "."),
-        AddedBrand = Table.AddColumn(Unpivoted, "Brand", each CleanSheetName)
+        AddedBrand = Table.AddColumn(TypedValues, "Brand", each CleanSheetName)
     in
         AddedBrand,
 
     // 6. Apply this mini-process to every valid sheet
     ProcessedData = Table.AddColumn(FilteredSheets, "CleanData", each ProcessSheet([Data], [Name])),
     
-    // 7. Expand the cleaned data (REMOVED: Column_A)
+    // 7. Expand the cleaned data
     ExpandedData = Table.ExpandTableColumn(ProcessedData, "CleanData", 
-        {"Brand", "Channel_Name", "Forecast_Date", "Value"}
+        {"Brand", "Channel_Name", "Data_Format_Type", "Forecast_Date", "Value"}
     ),
 
-    // 8. Clean up columns we no longer need (REMOVED: Column_A)
-    FinalTable = Table.SelectColumns(ExpandedData, {"Brand", "Channel_Name", "Forecast_Date", "Value"})
+    // 8. Select the final columns
+    FinalTable = Table.SelectColumns(ExpandedData, {"Brand", "Channel_Name", "Data_Format_Type", "Forecast_Date", "Value"})
 in
     FinalTable
