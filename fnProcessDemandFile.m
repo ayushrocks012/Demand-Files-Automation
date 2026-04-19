@@ -6,7 +6,10 @@ let
     // 2. Ask the Vault for the valid Sheets AND valid Channels
     ValidSheetsTable = Table.SelectRows(ParameterVault[Sheets], each [Growth Driver] = GrowthDriverName),
     ValidSheetNames = List.Buffer(List.Transform(ValidSheetsTable[Sheet Name], Text.Upper)),
+    
     ValidChannelsTable = Table.SelectRows(ParameterVault[Channels], each [Growth Driver] = GrowthDriverName),
+    // NEW: Create an UPPERCASE join key for the Master Channels to ignore case sensitivity
+    ChannelsWithUpper = Table.AddColumn(ValidChannelsTable, "JoinKey", each Text.Upper([Channel Name])),
 
     // 3. Resilient Filter for Sheets
     FilteredSheets = Table.SelectRows(Workbook, each 
@@ -37,8 +40,7 @@ let
         // Unpivot EVERYTHING to the right (Captures Dates AND Junk)
         Unpivoted = Table.UnpivotOtherColumns(CleanedChannels, {"Column_A", "Channel_Name"}, "Raw_Header", "Value"),
         
-        // NEW: The Strict Date Parser
-        // Tries to convert the header to a Real Date. If it's "0.00%_1", it fails and returns null.
+        // The Strict Date Parser
         ParseDates = Table.AddColumn(Unpivoted, "Parsed_Date", each 
             let 
                 AsNumber = try Number.From([Raw_Header]) otherwise null,
@@ -48,20 +50,25 @@ let
                 if AsSerial <> null then AsSerial else AsText, type date
         ),
         
-        // NEW: Filter out all the Junk Columns! (Drops any row where the date parse failed)
+        // Filter out all the Junk Columns
         FilteredDatesOnly = Table.SelectRows(ParseDates, each [Parsed_Date] <> null),
         
-        // NEW: Format the valid dates exactly how you want them ("Jan-23")
+        // Format the valid dates exactly how you want them ("Jan-23")
         FormattedDates = Table.TransformColumns(FilteredDatesOnly, {{"Parsed_Date", each Date.ToText(_, "MMM-yy"), type text}}),
         
         // Cleanup the columns (Remove the raw headers, rename the clean ones)
         FinalDates = Table.RenameColumns(Table.RemoveColumns(FormattedDates, {"Raw_Header"}), {{"Parsed_Date", "Forecast_Date"}}),
 
-        // Inner Join to filter valid Channels AND pull in the Data Format Type
-        MergedChannels = Table.NestedJoin(FinalDates, {"Channel_Name"}, ValidChannelsTable, {"Channel Name"}, "ChannelMasterInfo", JoinKind.Inner),
+        // NEW FIX: Add an UPPERCASE Join Key to the sheet data so it perfectly matches the Master Channels
+        AddJoinKey = Table.AddColumn(FinalDates, "JoinKey", each Text.Upper([Channel_Name])),
+
+        // Inner Join using the case-insensitive JoinKey!
+        MergedChannels = Table.NestedJoin(AddJoinKey, {"JoinKey"}, ChannelsWithUpper, {"JoinKey"}, "ChannelMasterInfo", JoinKind.Inner),
         ExpandedType = Table.ExpandTableColumn(MergedChannels, "ChannelMasterInfo", {"Type"}, {"Data_Format_Type"}),
         
-        TypedValues = Table.TransformColumnTypes(ExpandedType, {{"Value", type number}}),
+        // Clean up the temporary JoinKey and format the values
+        CleanedUp = Table.RemoveColumns(ExpandedType, {"JoinKey"}),
+        TypedValues = Table.TransformColumnTypes(CleanedUp, {{"Value", type number}}),
         
         CleanSheetName = Text.Replace(SheetName, "#", "."),
         AddedBrand = Table.AddColumn(TypedValues, "Brand", each CleanSheetName)
