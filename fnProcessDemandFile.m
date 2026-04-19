@@ -5,14 +5,11 @@ let
 
     // 2. Ask the Vault which sheets belong to this specific Growth Driver
     ValidSheetsTable = Table.SelectRows(ParameterVault[Sheets], each [Growth Driver] = GrowthDriverName),
-    // ENHANCEMENT: Convert the entire Master list of sheet names to UPPERCASE
     ValidSheetNames = List.Buffer(List.Transform(ValidSheetsTable[Sheet Name], Text.Upper)),
 
     // 3. Resilient Filter: Handles missing columns, replaces "#", and ignores Case Sensitivity
     FilteredSheets = Table.SelectRows(Workbook, each 
-        // Replace hash with dot, then convert to UPPERCASE so it matches the list above
         List.Contains(ValidSheetNames, Text.Upper(Text.Replace([Name], "#", "."))) 
-        // Safely check if it's a sheet, defaulting to "Sheet" if the Kind column is ever dropped
         and Record.FieldOrDefault(_, "Kind", "Sheet") = "Sheet"
     ),
 
@@ -55,12 +52,12 @@ let
     // 6. Apply this mini-process to every valid sheet
     ProcessedData = Table.AddColumn(FilteredSheets, "CleanData", each ProcessSheet([Data], [Name])),
     
-    // 7. Expand the cleaned data into one massive flat table for this file
+    // 7. Expand the cleaned data (REMOVED: Column_A)
     ExpandedData = Table.ExpandTableColumn(ProcessedData, "CleanData", 
-        {"Brand", "Column_A", "Channel_Name", "Forecast_Date", "Value"}
+        {"Brand", "Channel_Name", "Forecast_Date", "Value"}
     ),
 
-    // 8. Clean up columns we no longer need
-    FinalTable = Table.SelectColumns(ExpandedData, {"Brand", "Column_A", "Channel_Name", "Forecast_Date", "Value"})
+    // 8. Clean up columns we no longer need (REMOVED: Column_A)
+    FinalTable = Table.SelectColumns(ExpandedData, {"Brand", "Channel_Name", "Forecast_Date", "Value"})
 in
     FinalTable
