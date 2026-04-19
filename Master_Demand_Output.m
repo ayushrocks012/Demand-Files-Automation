@@ -28,8 +28,8 @@ let
     ]),
     MetaTable = Table.FromRecords(ExtractMeta),
     
-    // 6. Invoke the Engine! (Passes the Binary and Growth Driver to fnProcessDemandFile)
-    InvokeEngine = Table.AddColumn(MetaTable, "CleanData", each fnProcessDemandFile([FileBinary], [Growth Driver])),
+    // 6. Invoke the Engine! (CORRECTED: Now referencing [Growth_Driver_Name])
+    InvokeEngine = Table.AddColumn(MetaTable, "CleanData", each fnProcessDemandFile([FileBinary], [Growth_Driver_Name])),
     
     // 7. Expand the final clean data from the engine
     ExpandedData = Table.ExpandTableColumn(InvokeEngine, "CleanData", 
