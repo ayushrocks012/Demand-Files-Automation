@@ -6,16 +6,15 @@ let
     Source = SharePoint.Files("https://abbott.sharepoint.com/sites/GB-AN-HeadOffice", [ApiVersion = 15]),
     
     // 3. Match the exact File Names from your File Master sheet to the actual SharePoint files
-    // This ensures we ONLY pull the binaries for the files you explicitly listed
     MergedFiles = Table.NestedJoin(TargetFiles, {"File Name"}, Source, {"Name"}, "SP_Data", JoinKind.Inner),
     ExpandedSP = Table.ExpandTableColumn(MergedFiles, "SP_Data", {"Content"}, {"FileBinary"}),
     
-    // 4. Normalize the File Name (Replace dashes with underscores, then remove the file extension like .xlsb)
+    // 4. Normalize the File Name (Replace dashes with underscores, then remove extension)
     NormalizeName = Table.TransformColumns(ExpandedSP, {
         {"File Name", each Text.BeforeDelimiter(Text.Replace(_, "-", "_"), "."), type text}
     }),
     
-    // 5. Extract Metadata (Safely splits the name, handling variable length Version suffixes)
+    // 5. Extract Metadata (Safely splits the name)
     SplitName = Table.AddColumn(NormalizeName, "NameParts", each Text.Split([File Name], "_")),
     ExtractMeta = Table.TransformRows(SplitName, each _ & [
         Affiliate = [NameParts]{0}?,
@@ -23,24 +22,23 @@ let
         File_Type = [NameParts]{2}?,
         Demand_Plan_Month = [NameParts]{3}?,
         Actuals_Month = [NameParts]{4}?,
-        // Combines everything from index 5 onwards to handle "ADS", "ADS_v2", etc. safely
         Version = Text.Combine(List.Skip([NameParts], 5), "_")
     ]),
     MetaTable = Table.FromRecords(ExtractMeta),
     
-    // 6. Invoke the Engine! (CORRECTED: Now referencing [Growth_Driver_Name])
+    // 6. Invoke the Engine
     InvokeEngine = Table.AddColumn(MetaTable, "CleanData", each fnProcessDemandFile([FileBinary], [Growth_Driver_Name])),
     
-    // 7. Expand the final clean data from the engine
+    // 7. Expand the final clean data from the engine (REMOVED: Column_A)
     ExpandedData = Table.ExpandTableColumn(InvokeEngine, "CleanData", 
-        {"Brand", "Column_A", "Channel_Name", "Forecast_Date", "Value"}
+        {"Brand", "Channel_Name", "Forecast_Date", "Value"}
     ),
     
-    // 8. Select and order the final columns for your master flat file
+    // 8. Select and order the final columns for your master flat file (REMOVED: Column_A)
     FinalTable = Table.SelectColumns(ExpandedData, {
         "Year Folder", "Month Folder", "Affiliate", "Growth_Driver_Name", "Brand", 
         "File_Type", "Demand_Plan_Month", "Actuals_Month", "Version", 
-        "Column_A", "Channel_Name", "Forecast_Date", "Value"
+        "Channel_Name", "Forecast_Date", "Value"
     })
 in
     FinalTable
