@@ -7,8 +7,13 @@ let
     ValidSheetsTable = Table.SelectRows(ParameterVault[Sheets], each [Growth Driver] = GrowthDriverName),
     ValidSheetNames = List.Buffer(ValidSheetsTable[Sheet Name]),
 
-    // 3. Filter the workbook to ONLY include those valid sheets
-    FilteredSheets = Table.SelectRows(Workbook, each List.Contains(ValidSheetNames, [Item]) and [Kind] = "Sheet"),
+    // 3. Resilient Filter: Handles missing columns and converts "#" back to "." for matching
+    FilteredSheets = Table.SelectRows(Workbook, each 
+        // Replace hash with dot so "3#2KCAL" matches "3.2KCAL" in your Master Sheet
+        List.Contains(ValidSheetNames, Text.Replace([Name], "#", ".")) 
+        // Safely check if it's a sheet, defaulting to "Sheet" if the Kind column is ever dropped
+        and Record.FieldOrDefault(_, "Kind", "Sheet") = "Sheet"
+    ),
 
     // 4. Ask the Vault where the data actually starts (e.g., Row 66)
     DateRowString = Table.SelectRows(ParameterVault[Config], each [KeyDetails] = "Date Row"){0}[Value],
@@ -17,7 +22,7 @@ let
     // 5. Build the mini-process to clean a SINGLE sheet
     ProcessSheet = (SheetData as table, SheetName as text) =>
     let
-        // Skip the junk rows above the header (e.g., skip 65 rows if data starts at 66)
+        // Skip the junk rows above the header
         SkippedRows = Table.Skip(SheetData, DateRow - 1),
         // Promote the new top row to be the column headers
         PromotedHeaders = Table.PromoteHeaders(SkippedRows, [PromoteAllScalars=true]),
@@ -26,7 +31,7 @@ let
         ColAName = Table.ColumnNames(PromotedHeaders){0},
         LabelColumnName = Table.ColumnNames(PromotedHeaders){1},
         
-        // Rename them to safe, standardized names so the code never breaks
+        // Rename them to safe, standardized names
         StandardizedHeaders = Table.RenameColumns(PromotedHeaders, {
             {ColAName, "Column_A"}, 
             {LabelColumnName, "Channel_Name"}
@@ -40,20 +45,21 @@ let
         ColumnsToUnpivot = List.Skip(AllStandardColumns, 2),
         Unpivoted = Table.Unpivot(FilteredBlanks, ColumnsToUnpivot, "Forecast_Date", "Value"),
         
-        // Add a column with the Brand (Sheet) Name
-        AddedBrand = Table.AddColumn(Unpivoted, "Brand", each SheetName)
+        // Convert the hash back to a dot for your final, clean Output file
+        CleanSheetName = Text.Replace(SheetName, "#", "."),
+        AddedBrand = Table.AddColumn(Unpivoted, "Brand", each CleanSheetName)
     in
         AddedBrand,
 
-    // 6. Apply this mini-process to every valid sheet in the workbook
-    ProcessedData = Table.AddColumn(FilteredSheets, "CleanData", each ProcessSheet([Data], [Item])),
+    // 6. Apply this mini-process to every valid sheet (CORRECTED: Using [Name] instead of [Item])
+    ProcessedData = Table.AddColumn(FilteredSheets, "CleanData", each ProcessSheet([Data], [Name])),
     
     // 7. Expand the cleaned data into one massive flat table for this file
     ExpandedData = Table.ExpandTableColumn(ProcessedData, "CleanData", 
         {"Brand", "Column_A", "Channel_Name", "Forecast_Date", "Value"}
     ),
 
-    // 8. Clean up columns we no longer need (like the raw binary sheet data)
+    // 8. Clean up columns we no longer need
     FinalTable = Table.SelectColumns(ExpandedData, {"Brand", "Column_A", "Channel_Name", "Forecast_Date", "Value"})
 in
     FinalTable
