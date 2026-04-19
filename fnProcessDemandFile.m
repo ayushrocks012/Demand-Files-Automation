@@ -5,12 +5,13 @@ let
 
     // 2. Ask the Vault which sheets belong to this specific Growth Driver
     ValidSheetsTable = Table.SelectRows(ParameterVault[Sheets], each [Growth Driver] = GrowthDriverName),
-    ValidSheetNames = List.Buffer(ValidSheetsTable[Sheet Name]),
+    // ENHANCEMENT: Convert the entire Master list of sheet names to UPPERCASE
+    ValidSheetNames = List.Buffer(List.Transform(ValidSheetsTable[Sheet Name], Text.Upper)),
 
-    // 3. Resilient Filter: Handles missing columns and converts "#" back to "." for matching
+    // 3. Resilient Filter: Handles missing columns, replaces "#", and ignores Case Sensitivity
     FilteredSheets = Table.SelectRows(Workbook, each 
-        // Replace hash with dot so "3#2KCAL" matches "3.2KCAL" in your Master Sheet
-        List.Contains(ValidSheetNames, Text.Replace([Name], "#", ".")) 
+        // Replace hash with dot, then convert to UPPERCASE so it matches the list above
+        List.Contains(ValidSheetNames, Text.Upper(Text.Replace([Name], "#", "."))) 
         // Safely check if it's a sheet, defaulting to "Sheet" if the Kind column is ever dropped
         and Record.FieldOrDefault(_, "Kind", "Sheet") = "Sheet"
     ),
@@ -51,7 +52,7 @@ let
     in
         AddedBrand,
 
-    // 6. Apply this mini-process to every valid sheet (CORRECTED: Using [Name] instead of [Item])
+    // 6. Apply this mini-process to every valid sheet
     ProcessedData = Table.AddColumn(FilteredSheets, "CleanData", each ProcessSheet([Data], [Name])),
     
     // 7. Expand the cleaned data into one massive flat table for this file
