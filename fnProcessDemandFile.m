@@ -1,6 +1,6 @@
 (FileBinary as binary, GrowthDriverName as text) =>
 let
-    // 1. Open Workbook (Your #"Imported Excel Workbook" step)
+    // 1. Open Workbook
     Workbook = Excel.Workbook(FileBinary, true, true),
 
     // 2. Filter for valid sheets based on your Sheet Master
@@ -11,27 +11,24 @@ let
         and Record.FieldOrDefault(_, "Kind", "Sheet") = "Sheet"
     ),
 
-    // 3. Get the dynamic row number (66)
-    DateRowString = Table.SelectRows(ParameterVault[Config], each [KeyDetails] = "Date Row"){0}[Value],
-    DateRow = Number.From(DateRowString),
-
-    // 4. YOUR EXACT LOGIC APPLIED TO EACH SHEET
+    // 3. YOUR EXACT RECORDED LOGIC APPLIED TO EACH SHEET
     ProcessSheet = (SheetData as table, SheetName as text) =>
     let
-        // Your #"Removed Columns" step
+        // #"Removed Columns" = Table.RemoveColumns(...,{"Column1"})
+        // (Wrapped in a 'try' just in case a user accidentally deletes Column A before saving)
         RemovedCol1 = try Table.RemoveColumns(SheetData, {"Column1"}) otherwise SheetData,
         
-        // Your #"Removed Top Rows" step (65)
-        SkippedRows = Table.Skip(RemovedCol1, DateRow - 1),
+        // #"Removed Top Rows" = Table.Skip(#"Removed Columns",65)
+        SkippedRows = Table.Skip(RemovedCol1, 65),
         
-        // Your #"Promoted Headers" step
+        // #"Promoted Headers" = Table.PromoteHeaders(#"Removed Blank Rows", [PromoteAllScalars=true])
         PromotedHeaders = Table.PromoteHeaders(SkippedRows, [PromoteAllScalars=true]),
         
-        // Find the label column (which is now the first column) and rename it for consistency
+        // Standardize the first column name to "Channel_Name" so the Master Query can join on it later
         FirstColName = Table.ColumnNames(PromotedHeaders){0},
         RenamedLabel = Table.RenameColumns(PromotedHeaders, {{FirstColName, "Channel_Name"}}),
         
-        // Your step to filter out null/blank rows
+        // #"Filtered Rows1" = Table.SelectRows(...) -> Your step to filter out null/blank rows
         RemoveBlanks = Table.SelectRows(RenamedLabel, each [Channel_Name] <> null and [Channel_Name] <> ""),
         
         // Tag it with the Brand name
@@ -40,7 +37,7 @@ let
     in
         AddedBrand,
 
-    // 5. Run your logic on every sheet and stack them into one Wide Table
+    // 4. Run your logic on every sheet and stack them into one Wide Table
     ProcessedData = Table.AddColumn(FilteredSheets, "CleanData", each ProcessSheet([Data], [Name])),
     CombinedWideTable = Table.Combine(ProcessedData[CleanData])
 in
