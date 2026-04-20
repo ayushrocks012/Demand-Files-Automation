@@ -3,7 +3,7 @@ let
     TargetFiles = ParameterVault[Files],
     Source = SharePoint.Files("https://abbott.sharepoint.com/sites/GB-AN-HeadOffice", [ApiVersion = 15]),
     
-    // 2. Match the exact File Names (This replaces your hardcoded folder path with dynamic matching)
+    // 2. Match the exact File Names to the SharePoint files
     MergedFiles = Table.NestedJoin(TargetFiles, {"File Name"}, Source, {"Name"}, "SP_Data", JoinKind.Inner),
     ExpandedSP = Table.ExpandTableColumn(MergedFiles, "SP_Data", {"Content"}, {"FileBinary"}),
     
@@ -16,10 +16,46 @@ let
     ]),
     MetaTable = Table.FromRecords(ExtractMeta),
     
-    // 4. Run Your Engine (Returns the stacked Wide Tables)
+    // =========================================================================
+    // 4. THE INTERNAL ENGINE (Defined right here so you don't need a 2nd query)
+    // =========================================================================
+    fnProcessDemandFile = (FileBinary as binary, GrowthDriverName as text) =>
+    let
+        Workbook = Excel.Workbook(FileBinary, true, true),
+        ValidSheetsTable = Table.SelectRows(ParameterVault[Sheets], each [Growth Driver] = GrowthDriverName),
+        ValidSheetNames = List.Buffer(List.Transform(ValidSheetsTable[Sheet Name], Text.Upper)),
+        
+        FilteredSheets = Table.SelectRows(Workbook, each 
+            List.Contains(ValidSheetNames, Text.Upper(Text.Replace([Name], "#", "."))) 
+            and Record.FieldOrDefault(_, "Kind", "Sheet") = "Sheet"
+        ),
+
+        // Your exact logic applied to each sheet
+        ProcessSheet = (SheetData as table, SheetName as text) =>
+        let
+            RemovedCol1 = try Table.RemoveColumns(SheetData, {"Column1"}) otherwise SheetData,
+            SkippedRows = Table.Skip(RemovedCol1, 65),
+            PromotedHeaders = Table.PromoteHeaders(SkippedRows, [PromoteAllScalars=true]),
+            
+            FirstColName = Table.ColumnNames(PromotedHeaders){0},
+            RenamedLabel = Table.RenameColumns(PromotedHeaders, {{FirstColName, "Channel_Name"}}),
+            RemoveBlanks = Table.SelectRows(RenamedLabel, each [Channel_Name] <> null and [Channel_Name] <> ""),
+            
+            CleanSheetName = Text.Replace(SheetName, "#", "."),
+            AddedBrand = Table.AddColumn(RemoveBlanks, "Brand", each CleanSheetName)
+        in
+            AddedBrand,
+
+        ProcessedData = Table.AddColumn(FilteredSheets, "CleanData", each ProcessSheet([Data], [Name])),
+        CombinedWideTable = Table.Combine(ProcessedData[CleanData])
+    in
+        CombinedWideTable,
+    // =========================================================================
+
+    // 5. Run the Internal Engine (Returns the stacked Wide Tables)
     InvokeEngine = Table.AddColumn(MetaTable, "CleanData", each fnProcessDemandFile([FileBinary], [Growth_Driver_Name])),
     
-    // 5. Inject Metadata into the Wide Tables
+    // 6. Inject Metadata into the Wide Tables
     InjectMeta = Table.AddColumn(InvokeEngine, "WideDataWithMeta", each 
         let 
             tbl = [CleanData], Rec = _,
@@ -34,20 +70,20 @@ let
         in t8
     ),
     
-    // 6. Stack everything into ONE massive wide table
+    // 7. Stack everything into ONE massive wide table
     MassiveWideTable = Table.Combine(InjectMeta[WideDataWithMeta]),
 
-    // 7. Filter using your Channel Master (Growth Driver + Channel Name)
+    // 8. Filter using your Channel Master (Growth Driver + Channel Name)
     ValidChannels = Table.AddColumn(ParameterVault[Channels], "JoinKey", each try Text.Upper([Growth Driver] & "|" & Text.Trim([Channel Name])) otherwise ""),
     WideWithJoinKey = Table.AddColumn(MassiveWideTable, "JoinKey", each try Text.Upper([Growth_Driver_Name] & "|" & Text.Trim([Channel_Name])) otherwise ""),
     MergedChannels = Table.NestedJoin(WideWithJoinKey, {"JoinKey"}, ValidChannels, {"JoinKey"}, "ChannelMasterInfo", JoinKind.Inner),
     FilteredWideTable = Table.ExpandTableColumn(MergedChannels, "ChannelMasterInfo", {"Type"}, {"Data_Format_Type"}),
 
-    // 8. Unpivot ONLY the Dates
+    // 9. Unpivot ONLY the Dates
     MetaCols = {"Year Folder", "Month Folder", "Affiliate", "Growth_Driver_Name", "Brand", "File_Type", "Demand_Plan_Month", "Actuals_Month", "Version", "Channel_Name", "Data_Format_Type", "JoinKey"},
     Unpivoted = Table.UnpivotOtherColumns(FilteredWideTable, MetaCols, "Raw_Date", "Value"),
 
-    // 9. Clean Dates & Drop Ghost Columns
+    // 10. Clean Dates & Drop Ghost Columns
     CleanDates = Table.AddColumn(Unpivoted, "Forecast_Date", each 
         let 
             AsNum = try Number.From([Raw_Date]) otherwise null,
@@ -59,7 +95,7 @@ let
     ),
     FilterValidDates = Table.SelectRows(CleanDates, each [Forecast_Date] <> null),
 
-    // 10. Final Cleanup
+    // 11. Final Cleanup
     TypedValues = Table.TransformColumnTypes(FilterValidDates, {{"Value", type number}}),
     FinalTable = Table.SelectColumns(TypedValues, {
         "Year Folder", "Month Folder", "Affiliate", "Growth_Driver_Name", "Brand", 
